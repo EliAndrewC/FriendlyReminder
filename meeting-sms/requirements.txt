@@ -1,0 +1,5 @@
+flask==3.1.*
+gunicorn==23.*
+gspread==6.*
+google-auth==2.*
+twilio==9.*

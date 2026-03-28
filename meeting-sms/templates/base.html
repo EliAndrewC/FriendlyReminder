@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Meeting SMS</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Meeting SMS</h1>
+            {% if session.get("phone") %}
+            <nav>
+                <a href="{{ url_for('send') }}">Send</a>
+                <a href="{{ url_for('logout') }}">Sign out</a>
+            </nav>
+            {% endif %}
+        </header>
+        {% with messages = get_flashed_messages() %}
+        {% if messages %}
+        <div class="flash">
+            {% for msg in messages %}
+            <p>{{ msg }}</p>
+            {% endfor %}
+        </div>
+        {% endif %}
+        {% endwith %}
+        <main>
+            {% block content %}{% endblock %}
+        </main>
+    </div>
+</body>
+</html>

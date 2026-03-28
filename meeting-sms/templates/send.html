@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Send a message</h2>
+<form method="post" id="send-form">
+    <label for="message">Message</label>
+    <textarea id="message" name="message" maxlength="{{ max_length }}" rows="3" required autofocus placeholder="Alexandria Friends Meetinghouse is CLOSED due to snow this weekend"></textarea>
+    <div class="char-count">
+        <span id="count">0</span> / {{ max_length }} characters
+    </div>
+    <p class="secondary">Your message will be sent with "Reply STOP to unsubscribe" appended.</p>
+
+    <fieldset>
+        <legend>Send to</legend>
+        <label class="radio-label">
+            <input type="radio" name="mode" value="test" checked>
+            Test numbers only
+        </label>
+        <label class="radio-label">
+            <input type="radio" name="mode" value="real" id="mode-real">
+            All recipients
+        </label>
+    </fieldset>
+
+    <button type="submit">Send</button>
+</form>
+
+<script>
+const textarea = document.getElementById("message");
+const count = document.getElementById("count");
+const form = document.getElementById("send-form");
+const maxLen = {{ max_length }};
+
+textarea.addEventListener("input", () => {
+    const len = textarea.value.length;
+    count.textContent = len;
+    count.className = len > maxLen ? "over" : len > maxLen - 20 ? "warn" : "";
+});
+
+form.addEventListener("submit", (e) => {
+    if (document.getElementById("mode-real").checked) {
+        if (!confirm("Send this message to ALL recipients?")) {
+            e.preventDefault();
+        }
+    }
+});
+</script>
+{% endblock %}

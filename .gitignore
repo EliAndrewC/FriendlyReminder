@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Secrets
+*.json
+.env
+.env.*
+
+# PDF (guestbook in static/ is committed; root copy is not part of the app)
+/guestbook.pdf

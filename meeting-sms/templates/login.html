@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Sign in</h2>
+<p>Enter your phone number to receive a sign-in code.</p>
+<form method="post">
+    <label for="phone">Phone number</label>
+    <input type="tel" id="phone" name="phone" placeholder="(555) 123-4567" required autofocus>
+    <button type="submit">Send code</button>
+</form>
+{% endblock %}

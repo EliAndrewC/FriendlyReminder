@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>{% if mode == "real" %}Messages sent{% else %}Test messages sent{% endif %}</h2>
+
+<p>Sent <strong>{{ sent_count }}</strong> of {{ total }} messages.</p>
+
+<div class="message-preview">
+    <p>{{ message }}</p>
+</div>
+
+{% if errors %}
+<h3>Errors</h3>
+<ul class="errors">
+    {% for error in errors %}
+    <li>{{ error }}</li>
+    {% endfor %}
+</ul>
+{% endif %}
+
+<a href="{{ url_for('send') }}" class="button">Send another message</a>
+{% endblock %}

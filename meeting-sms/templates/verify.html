@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Enter your code</h2>
+<p>We sent a 6-digit code to your phone. It expires in 5 minutes.</p>
+<form method="post">
+    <label for="code">Code</label>
+    <input type="text" id="code" name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" placeholder="000000" required autofocus autocomplete="one-time-code">
+    <button type="submit">Verify</button>
+</form>
+<p class="secondary"><a href="{{ url_for('login') }}">Use a different number</a></p>
+{% endblock %}
