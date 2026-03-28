@@ -16,6 +16,7 @@ SMS broadcast tool for Alexandria Friends Meeting. Clerks sign in via phone numb
 ```
 meeting-sms/
   app.py              — All application logic (routes, auth, SMS sending)
+  test_app.py         — pytest test suite (mocks Twilio and Google Sheets)
   templates/          — Jinja2 templates (base, login, verify, send, sent, privacy, terms)
   static/style.css    — Minimal CSS
   static/guestbook.pdf — Served at /guestbook.pdf
@@ -65,13 +66,17 @@ If developing in a fresh container (e.g. new Claude Code session):
 ```bash
 # Install flyctl (may already be installed)
 curl -L https://fly.io/install.sh | sh
-export FLYCTL_INSTALL="/home/user/.fly"
+export FLYCTL_INSTALL="/home/agent/.fly"
 export PATH="$FLYCTL_INSTALL/bin:$PATH"
-
-# Authenticate — either interactively or with a token:
-fly auth login
-# or: export FLY_API_TOKEN="FlyV1 ..."
 ```
+
+The Fly API token and other secrets are stored in `/workspace/.env`. **Do not `source` this file** — it contains unquoted JSON and base64 values that break shell parsing. Instead, extract `FLY_API_TOKEN` directly:
+
+```bash
+export FLY_API_TOKEN=$(grep '^FLY_API_TOKEN=' /workspace/.env | cut -d= -f2-)
+```
+
+Verify with `fly status` from the `meeting-sms/` directory.
 
 ## Google Spreadsheet
 
@@ -104,6 +109,33 @@ The app reads from row 3 onward (skips the explanation and header rows). Phone n
 - **JS confirm dialog** for sending to real recipients (not a separate confirmation page).
 - **30-day sessions** via Flask signed cookies.
 - **Toll-free number** — avoids the complexity of A2P 10DLC registration for local numbers.
+
+## Testing and linting
+
+Use **test-driven development** for bugfixes and new features: write failing tests first, then implement until they pass.
+
+### Running tests
+
+```bash
+cd /workspace/meeting-sms
+python3 -m pytest test_app.py -v
+```
+
+With coverage report:
+
+```bash
+python3 -m pytest test_app.py --cov=app --cov-report=term-missing
+```
+
+External services (Twilio, Google Sheets) are mocked in tests — no credentials needed to run the suite.
+
+### Formatting
+
+Code is formatted with **black**. Run it before committing:
+
+```bash
+python3 -m black app.py test_app.py
+```
 
 ## Running locally
 
