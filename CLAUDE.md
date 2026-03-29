@@ -17,7 +17,7 @@ SMS broadcast tool for Alexandria Friends Meeting. Clerks sign in via phone numb
 meeting-sms/
   app.py              — All application logic (routes, auth, SMS sending)
   test_app.py         — pytest test suite (mocks Twilio and Google Sheets)
-  templates/          — Jinja2 templates (base, login, verify, send, sent, privacy, terms)
+  templates/          — Jinja2 templates (base, login, verify, send, sent, voice, voice_sent, privacy, terms)
   static/style.css    — Minimal CSS
   static/guestbook.pdf — Served at /guestbook.pdf
   Dockerfile          — Python 3.12 slim image, gunicorn on port 8080
@@ -82,14 +82,40 @@ Verify with `fly status` from the `meeting-sms/` directory.
 
 The spreadsheet serves as the admin interface — non-technical clerks manage contacts by editing it directly.
 
-- **Service account key:** `woodlawn-sms-d74fa6940b5b.json` (in project root, git-ignored)
-- **Spreadsheet ID:** Set as `SPREADSHEET_ID` Fly secret (also in `setup_sheet.py` locally)
+- **Service account key:** The JSON key is stored as the `GOOGLE_CREDENTIALS` Fly secret (and in `/workspace/.env`). The original file `woodlawn-sms-d74fa6940b5b.json` is git-ignored and may not be present in fresh containers.
+- **Spreadsheet ID:** Set as `SPREADSHEET_ID` Fly secret (and in `/workspace/.env`).
+
+### Accessing the spreadsheet programmatically
+
+Both `GOOGLE_CREDENTIALS` and `SPREADSHEET_ID` are available in `/workspace/.env`. Extract them with `cut` (do not `source` the file — see Container bootstrap above):
+
+```bash
+export SPREADSHEET_ID=$(grep '^SPREADSHEET_ID=' /workspace/.env | cut -d= -f2-)
+export GOOGLE_CREDENTIALS=$(grep '^GOOGLE_CREDENTIALS=' /workspace/.env | cut -d= -f2-)
+```
+
+Then use `gspread` in Python:
+
+```python
+import json, os, gspread
+from google.oauth2.service_account import Credentials
+
+creds = Credentials.from_service_account_info(
+    json.loads(os.environ["GOOGLE_CREDENTIALS"]),
+    scopes=["https://www.googleapis.com/auth/spreadsheets"],
+)
+gc = gspread.authorize(creds)
+sheet = gc.open_by_key(os.environ["SPREADSHEET_ID"])
+ws = sheet.worksheet("Recipients")  # or "Test", "Admins"
+```
+
+Use the read-write scope (`spreadsheets` not `spreadsheets.readonly`) when you need to update cells. The `gspread` API provides `ws.get_all_values()`, `ws.update_cell(row, col, value)`, `ws.append_row([...])`, etc.
 
 ### Tab layout
 
 Three tabs, each with the same structure:
 - **Row 1:** Tab name + explanation text
-- **Row 2:** Headers (`Name` | `Phone`)
+- **Row 2:** Headers (`Name` | `Phone` | `Voice` | `Opted Out` | `Opt-Out Date`)
 - **Row 3+:** Data
 
 | Tab | Purpose |
@@ -98,7 +124,15 @@ Three tabs, each with the same structure:
 | **Test** | Numbers that receive test-mode messages |
 | **Admins** | Phone numbers authorized to sign in and send |
 
-The app reads from row 3 onward (skips the explanation and header rows). Phone numbers are in column B and are normalized to E.164 format (`+1XXXXXXXXXX`).
+| Column | Description |
+|--------|-------------|
+| **A: Name** | Contact name |
+| **B: Phone** | Phone number, normalized to E.164 (`+1XXXXXXXXXX`) |
+| **C: Voice** | Checkbox — if checked, contact receives voice calls instead of SMS |
+| **D: Opted Out** | Checkbox — checked when someone presses 9 to unsubscribe from voice calls (or manually by a clerk) |
+| **E: Opt-Out Date** | Date auto-filled by the app when someone opts out via keypad; empty if manually opted out |
+
+The app reads from row 3 onward (skips the explanation and header rows). The Admins tab only uses columns A and B.
 
 ## Key design decisions
 
@@ -106,6 +140,8 @@ The app reads from row 3 onward (skips the explanation and header rows). Phone n
 - **OTP via plain SMS**, not Twilio Verify (cheaper, no extra service).
 - **In-memory OTP storage** — codes expire after 5 minutes. Fine because the OTP flow is fast and the app is single-instance.
 - **Message length cap: 133 chars** — leaves room for the `\nReply STOP to unsubscribe` suffix within a single 160-char SMS segment.
+- **Voice calls for landlines** — contacts with the Voice checkbox get TTS calls instead of SMS. Separate form with no character limit. Calls include "press 9 to unsubscribe" which writes the opt-out back to the spreadsheet.
+- **Voice opt-out webhook** (`/voice-optout`) — Twilio POSTs here when a call recipient presses a key. Requires the `APP_URL` env var (defaults to `https://ammsms.fly.dev`). Google Sheets scope is read-write to support this.
 - **JS confirm dialog** for sending to real recipients (not a separate confirmation page).
 - **30-day sessions** via Flask signed cookies.
 - **Toll-free number** — avoids the complexity of A2P 10DLC registration for local numbers.

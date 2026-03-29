@@ -12,7 +12,8 @@
             <h1>Meeting SMS</h1>
             {% if session.get("phone") %}
             <nav>
-                <a href="{{ url_for('send') }}">Send</a>
+                <a href="{{ url_for('send') }}">SMS</a>
+                <a href="{{ url_for('voice') }}">Voice</a>
                 <a href="{{ url_for('logout') }}">Sign out</a>
             </nav>
             {% endif %}

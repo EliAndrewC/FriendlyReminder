@@ -1,8 +1,8 @@
 {% extends "base.html" %}
 {% block content %}
-<h2>{% if mode == "real" %}Messages sent{% else %}Test messages sent{% endif %}</h2>
+<h2>{% if mode == "real" %}Voice messages sent{% else %}Test voice messages sent{% endif %}</h2>
 
-<p>Sent <strong>{{ sent_count }}</strong> of {{ total }} messages.</p>
+<p>Called <strong>{{ sent_count }}</strong> of {{ total }} recipients.</p>
 
 <div class="message-preview">
     <p>{{ message }}</p>
@@ -17,5 +17,5 @@
 </ul>
 {% endif %}
 
-<a href="{{ url_for('send') }}" class="button">Return to message form</a>
+<a href="{{ url_for('voice') }}" class="button">Return to message form</a>
 {% endblock %}
