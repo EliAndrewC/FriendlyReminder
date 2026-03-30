@@ -895,8 +895,8 @@ class TestSmsReply:
             data={"From": "+15551111111", "Body": "Thanks for the update!"},
         )
         assert resp.status_code == 200
-        mock_replies.append_row.assert_called_once()
-        row = mock_replies.append_row.call_args[0][0]
+        mock_replies.insert_row.assert_called_once()
+        row = mock_replies.insert_row.call_args[0][0]
         assert row[0] == "+15551111111"  # phone
         assert row[1] == "Alice"  # name found in Recipients
         assert row[3] == "Thanks for the update!"  # message body
@@ -909,8 +909,8 @@ class TestSmsReply:
             data={"From": "+15559999999", "Body": "Who is this?"},
         )
         assert resp.status_code == 200
-        mock_replies.append_row.assert_called_once()
-        row = mock_replies.append_row.call_args[0][0]
+        mock_replies.insert_row.assert_called_once()
+        row = mock_replies.insert_row.call_args[0][0]
         assert row[0] == "+15559999999"
         assert row[1] == ""  # unknown name
         assert row[3] == "Who is this?"
@@ -923,7 +923,7 @@ class TestSmsReply:
             data={"From": "+15714352602", "Body": "Got it"},
         )
         assert resp.status_code == 200
-        row = mock_replies.append_row.call_args[0][0]
+        row = mock_replies.insert_row.call_args[0][0]
         assert row[1] == "Eli"
 
     @patch.object(app_module, "get_sheet")
@@ -933,7 +933,7 @@ class TestSmsReply:
             "/sms-reply",
             data={"From": "+15551111111", "Body": "Hi"},
         )
-        row = mock_replies.append_row.call_args[0][0]
+        row = mock_replies.insert_row.call_args[0][0]
         # Column index 2 should be a timestamp string
         assert "2026" in row[2]  # should contain the year
 
@@ -1062,7 +1062,7 @@ class TestIncomingCall:
         assert resp.status_code == 200
         assert resp.content_type == "text/xml"
         assert b"<Say" in resp.data
-        assert b"Alexandria Friends Meeting" in resp.data
+        assert b"Alexandria" in resp.data
 
     def test_returns_record_verb(self, client):
         resp = client.post(
@@ -1116,8 +1116,8 @@ class TestRecordingComplete:
                 "RecordingDuration": "15",
             },
         )
-        mock_voicemails.append_row.assert_called_once()
-        row = mock_voicemails.append_row.call_args[0][0]
+        mock_voicemails.insert_row.assert_called_once()
+        row = mock_voicemails.insert_row.call_args[0][0]
         assert row[0] == "+15551111111"  # phone
         assert "2026" in row[2]  # timestamp
         assert "/recording/RE123" in row[4]  # proxy URL with SID
@@ -1152,7 +1152,7 @@ class TestRecordingComplete:
                 "RecordingDuration": "15",
             },
         )
-        row = mock_voicemails.append_row.call_args[0][0]
+        row = mock_voicemails.insert_row.call_args[0][0]
         assert row[1] == "Alice"
 
 
@@ -1351,8 +1351,8 @@ class TestMessageLog:
             {"phone": "+15552222222", "voice": False, "opted_out": False, "name": "B"},
         ]
         client.post("/send", data={"message": "Snow day!", "mode": "test"})
-        mock_log.append_row.assert_called_once()
-        row = mock_log.append_row.call_args[0][0]
+        mock_log.insert_row.assert_called_once()
+        row = mock_log.insert_row.call_args[0][0]
         assert "2026" in row[0]  # timestamp
         assert row[1] == "test"  # mode
         assert row[2] == "SMS"  # type
@@ -1370,7 +1370,7 @@ class TestMessageLog:
             {"phone": "+15551111111", "voice": False, "opted_out": False, "name": "A"},
         ]
         client.post("/send", data={"message": "Hello", "mode": "real"})
-        row = mock_log.append_row.call_args[0][0]
+        row = mock_log.insert_row.call_args[0][0]
         assert row[1] == "real"
 
     @patch.object(app_module, "get_sheet")
@@ -1388,8 +1388,8 @@ class TestMessageLog:
             {"phone": "+15554444444", "voice": True, "opted_out": False, "name": "C"},
         ]
         client.post("/voice", data={"message": "Meeting canceled", "mode": "test"})
-        mock_log.append_row.assert_called_once()
-        row = mock_log.append_row.call_args[0][0]
+        mock_log.insert_row.assert_called_once()
+        row = mock_log.insert_row.call_args[0][0]
         assert "2026" in row[0]  # timestamp
         assert row[1] == "test"  # mode
         assert row[2] == "Voice"  # type
@@ -1562,8 +1562,10 @@ class TestReplyNotifications:
 
     @patch.object(app_module.twilio_client.messages, "create")
     @patch.object(app_module, "get_sheet")
-    def test_no_notification_within_one_hour(self, mock_sheet, mock_sms, client):
-        """If a recent message exists (< 1 hour ago), no notification."""
+    def test_no_notification_same_sender_within_one_hour(
+        self, mock_sheet, mock_sms, client
+    ):
+        """Same sender within an hour should suppress notification."""
         from datetime import datetime
 
         recent = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1572,12 +1574,65 @@ class TestReplyNotifications:
             sms_replies_rows=[
                 ["SMS Replies", ""],
                 ["Phone", "Name", "Date/Time", "Message"],
-                ["+15558888888", "Someone", recent, "Earlier message"],
+                ["+15559999999", "", recent, "Earlier message"],
             ],
         )
         client.post(
             "/sms-reply",
+            data={"From": "+15559999999", "Body": "Hello again"},
+        )
+        notification_calls = [
+            c for c in mock_sms.call_args_list if "+15714352602" in str(c)
+        ]
+        assert len(notification_calls) == 0
+
+    @patch.object(app_module.twilio_client.messages, "create")
+    @patch.object(app_module, "get_sheet")
+    def test_notification_sent_different_sender_within_one_hour(
+        self, mock_sheet, mock_sms, client
+    ):
+        """Different known sender within an hour should still notify."""
+        from datetime import datetime
+
+        recent = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self._make_sheet_mocks(
+            mock_sheet,
+            sms_replies_rows=[
+                ["SMS Replies", ""],
+                ["Phone", "Name", "Date/Time", "Message"],
+                ["+15558888888", "Julie", recent, "Earlier message"],
+            ],
+        )
+        # This is from a different unknown number — different sender
+        client.post(
+            "/sms-reply",
             data={"From": "+15559999999", "Body": "Hello"},
+        )
+        notification_calls = [
+            c for c in mock_sms.call_args_list if "+15714352602" in str(c)
+        ]
+        assert len(notification_calls) == 1
+
+    @patch.object(app_module.twilio_client.messages, "create")
+    @patch.object(app_module, "get_sheet")
+    def test_two_unknown_numbers_within_hour_deduped(
+        self, mock_sheet, mock_sms, client
+    ):
+        """Two unknown numbers within an hour are treated as the same sender."""
+        from datetime import datetime
+
+        recent = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self._make_sheet_mocks(
+            mock_sheet,
+            sms_replies_rows=[
+                ["SMS Replies", ""],
+                ["Phone", "Name", "Date/Time", "Message"],
+                ["+15558888888", "", recent, "From unknown 1"],
+            ],
+        )
+        client.post(
+            "/sms-reply",
+            data={"From": "+15557777777", "Body": "From unknown 2"},
         )
         notification_calls = [
             c for c in mock_sms.call_args_list if "+15714352602" in str(c)
@@ -1587,13 +1642,13 @@ class TestReplyNotifications:
     @patch.object(app_module.twilio_client.messages, "create")
     @patch.object(app_module, "get_sheet")
     def test_notification_sent_after_one_hour(self, mock_sheet, mock_sms, client):
-        """If the most recent message is > 1 hour ago, send notification."""
+        """If the most recent message from same sender is > 1 hour ago, send notification."""
         self._make_sheet_mocks(
             mock_sheet,
             sms_replies_rows=[
                 ["SMS Replies", ""],
                 ["Phone", "Name", "Date/Time", "Message"],
-                ["+15558888888", "Someone", "2026-01-01 01:00:00", "Old message"],
+                ["+15559999999", "", "2026-01-01 01:00:00", "Old message"],
             ],
         )
         client.post(
@@ -1628,10 +1683,10 @@ class TestReplyNotifications:
 
     @patch.object(app_module.twilio_client.messages, "create")
     @patch.object(app_module, "get_sheet")
-    def test_voicemail_recent_suppresses_sms_notification(
+    def test_voicemail_from_same_sender_suppresses_notification(
         self, mock_sheet, mock_sms, client
     ):
-        """A recent voicemail should count toward the 1-hour window."""
+        """A recent voicemail from the same unknown sender suppresses SMS notification."""
         from datetime import datetime
 
         recent = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1647,7 +1702,7 @@ class TestReplyNotifications:
                     "Recording",
                     "Transcription",
                 ],
-                ["+15558888888", "", recent, "10", "https://...", ""],
+                ["+15559999999", "", recent, "10", "https://...", ""],
             ],
         )
         client.post(
@@ -1658,6 +1713,39 @@ class TestReplyNotifications:
             c for c in mock_sms.call_args_list if "+15714352602" in str(c)
         ]
         assert len(notification_calls) == 0
+
+    @patch.object(app_module.twilio_client.messages, "create")
+    @patch.object(app_module, "get_sheet")
+    def test_voicemail_from_different_sender_does_not_suppress(
+        self, mock_sheet, mock_sms, client
+    ):
+        """A recent voicemail from a different sender should NOT suppress notification."""
+        from datetime import datetime
+
+        recent = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self._make_sheet_mocks(
+            mock_sheet,
+            voicemails_rows=[
+                ["Voicemails", ""],
+                [
+                    "Phone",
+                    "Name",
+                    "Date/Time",
+                    "Duration",
+                    "Recording",
+                    "Transcription",
+                ],
+                ["+15558888888", "Julie", recent, "10", "https://...", ""],
+            ],
+        )
+        client.post(
+            "/sms-reply",
+            data={"From": "+15559999999", "Body": "Hello"},
+        )
+        notification_calls = [
+            c for c in mock_sms.call_args_list if "+15714352602" in str(c)
+        ]
+        assert len(notification_calls) == 1
 
     @patch.object(app_module.twilio_client.messages, "create")
     @patch.object(app_module, "get_sheet")
@@ -1712,3 +1800,234 @@ class TestReplyNotifications:
         )
         assert resp.status_code == 200
         assert b"<Response" in resp.data
+
+
+# ---------------------------------------------------------------------------
+# TTS worker dispatch
+# ---------------------------------------------------------------------------
+
+
+class TestVoiceWithTTS:
+    @patch.object(app_module, "_launch_tts_worker", return_value="machine-id-123")
+    def test_voice_launches_worker_and_returns_async(self, mock_launch, client):
+        login(client)
+        resp = client.post("/voice", data={"message": "Snow day", "mode": "test"})
+        assert resp.status_code == 200
+        assert b"being generated" in resp.data or b"being processed" in resp.data
+        mock_launch.assert_called_once_with("Snow day", "test", "Test")
+
+    @patch.object(app_module, "_launch_tts_worker", return_value="machine-id-123")
+    def test_voice_async_does_not_call_twilio_directly(self, mock_launch, client):
+        login(client)
+        with patch.object(app_module.twilio_client.calls, "create") as mock_calls:
+            client.post("/voice", data={"message": "Hello", "mode": "test"})
+            mock_calls.assert_not_called()
+
+    @patch.object(app_module, "_launch_tts_worker", return_value=None)
+    @patch.object(app_module.twilio_client.calls, "create")
+    @patch.object(app_module, "get_contacts")
+    @patch.object(app_module, "get_sheet")
+    def test_voice_falls_back_to_say_when_worker_returns_none(
+        self, mock_sheet, mock_contacts, mock_calls, mock_launch, client
+    ):
+        login(client)
+        mock_sheet.return_value.worksheet.return_value = MagicMock()
+        mock_contacts.return_value = [
+            {"phone": "+15552222222", "voice": True, "opted_out": False, "name": "A"},
+        ]
+        resp = client.post("/voice", data={"message": "Hello", "mode": "test"})
+        assert resp.status_code == 200
+        assert mock_calls.call_count == 1
+        assert "<Say" in mock_calls.call_args[1]["twiml"]
+
+    @patch.object(app_module, "_launch_tts_worker", side_effect=Exception("API error"))
+    @patch.object(app_module.twilio_client.calls, "create")
+    @patch.object(app_module, "get_contacts")
+    @patch.object(app_module, "get_sheet")
+    def test_voice_falls_back_to_say_on_worker_exception(
+        self, mock_sheet, mock_contacts, mock_calls, mock_launch, client
+    ):
+        login(client)
+        mock_sheet.return_value.worksheet.return_value = MagicMock()
+        mock_contacts.return_value = [
+            {"phone": "+15552222222", "voice": True, "opted_out": False, "name": "A"},
+        ]
+        resp = client.post("/voice", data={"message": "Hello", "mode": "test"})
+        assert resp.status_code == 200
+        assert mock_calls.call_count == 1
+
+    @patch.object(app_module, "http_requests")
+    def test_launch_tts_worker_sends_correct_payload(self, mock_requests, client):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"id": "machine-123"}
+        mock_requests.post.return_value = mock_resp
+        with patch.dict(
+            os.environ,
+            {
+                "TTS_IMAGE": "registry.fly.io/ammsms-tts:latest",
+                "FLY_API_TOKEN": "test-token",
+            },
+        ):
+            result = app_module._launch_tts_worker("Hello", "test", "Test")
+        assert result == "machine-123"
+        call_args = mock_requests.post.call_args
+        assert "/ammsms/" in call_args[0][0]
+        payload = call_args[1]["json"]
+        assert payload["config"]["env"]["MESSAGE_TEXT"] == "Hello"
+        assert payload["config"]["env"]["MODE"] == "test"
+        assert payload["config"]["auto_destroy"] is True
+
+    def test_launch_tts_worker_returns_none_without_tts_image(self, client):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("TTS_IMAGE", None)
+            result = app_module._launch_tts_worker("Hello", "test", "Test")
+        assert result is None
+
+    @patch.object(app_module, "_launch_tts_worker", return_value="machine-id-123")
+    def test_voice_async_mode_real_uses_recipients(self, mock_launch, client):
+        login(client)
+        client.post("/voice", data={"message": "Hello", "mode": "real"})
+        mock_launch.assert_called_once_with("Hello", "real", "Recipients")
+
+
+# ---------------------------------------------------------------------------
+# Voicemail greeting management
+# ---------------------------------------------------------------------------
+
+DEFAULT_GREETING = "Hello, you've reached Alexandria Friends Meeting. No one is available to take your call. Please leave a message after the beep."
+
+
+class TestVoicemailGreeting:
+    def test_requires_login(self, client):
+        resp = client.get("/voicemail-greeting")
+        assert resp.status_code == 302
+        assert "/login" in resp.headers["Location"]
+
+    @patch.object(app_module, "get_sheet")
+    def test_get_shows_form_with_default(self, mock_sheet, client):
+        login(client)
+        mock_ws = MagicMock()
+        mock_ws.get_all_values.return_value = [
+            ["Voicemail Greeting", ""],
+            ["Date/Time", "Message"],
+        ]
+        mock_sheet.return_value.worksheet.return_value = mock_ws
+        resp = client.get("/voicemail-greeting")
+        assert resp.status_code == 200
+        assert b"voicemail" in resp.data.lower()
+
+    @patch.object(app_module, "get_sheet")
+    def test_get_shows_current_greeting(self, mock_sheet, client):
+        login(client)
+        mock_ws = MagicMock()
+        mock_ws.get_all_values.return_value = [
+            ["Voicemail Greeting", ""],
+            ["Date/Time", "Message"],
+            ["2026-03-30 12:00:00", "Custom greeting text here"],
+        ]
+        mock_sheet.return_value.worksheet.return_value = mock_ws
+        resp = client.get("/voicemail-greeting")
+        assert b"Custom greeting text here" in resp.data
+
+    @patch.object(app_module, "get_sheet")
+    def test_post_saves_greeting_to_spreadsheet(self, mock_sheet, client):
+        login(client)
+        mock_ws = MagicMock()
+        mock_ws.get_all_values.return_value = [
+            ["Voicemail Greeting", ""],
+            ["Date/Time", "Message"],
+        ]
+        mock_sheet.return_value.worksheet.return_value = mock_ws
+        resp = client.post(
+            "/voicemail-greeting",
+            data={"message": "New greeting message"},
+        )
+        assert resp.status_code == 200
+        mock_ws.insert_row.assert_called_once()
+        row = mock_ws.insert_row.call_args[0][0]
+        assert row[1] == "New greeting message"
+        assert "2026" in row[0]  # timestamp
+
+    @patch.object(app_module, "_launch_greeting_worker", return_value="machine-123")
+    @patch.object(app_module, "get_sheet")
+    def test_post_kicks_off_tts_worker(self, mock_sheet, mock_launch, client):
+        login(client)
+        mock_ws = MagicMock()
+        mock_ws.get_all_values.return_value = [
+            ["Voicemail Greeting", ""],
+            ["Date/Time", "Message"],
+        ]
+        mock_sheet.return_value.worksheet.return_value = mock_ws
+        resp = client.post(
+            "/voicemail-greeting",
+            data={"message": "New greeting"},
+        )
+        assert resp.status_code == 200
+        mock_launch.assert_called_once_with("New greeting")
+        assert b"being generated" in resp.data.lower()
+
+    @patch.object(app_module, "_launch_greeting_worker", return_value=None)
+    @patch.object(app_module, "get_sheet")
+    def test_post_without_tts_shows_fallback_message(
+        self, mock_sheet, mock_launch, client
+    ):
+        login(client)
+        mock_ws = MagicMock()
+        mock_ws.get_all_values.return_value = [
+            ["Voicemail Greeting", ""],
+            ["Date/Time", "Message"],
+        ]
+        mock_sheet.return_value.worksheet.return_value = mock_ws
+        resp = client.post(
+            "/voicemail-greeting",
+            data={"message": "New greeting"},
+        )
+        assert resp.status_code == 200
+        assert b"fallback" in resp.data.lower()
+
+    @patch.object(app_module, "get_sheet")
+    def test_post_empty_message_flashes_error(self, mock_sheet, client):
+        login(client)
+        mock_ws = MagicMock()
+        mock_ws.get_all_values.return_value = [
+            ["Voicemail Greeting", ""],
+            ["Date/Time", "Message"],
+        ]
+        mock_sheet.return_value.worksheet.return_value = mock_ws
+        resp = client.post(
+            "/voicemail-greeting",
+            data={"message": "  "},
+        )
+        assert b"enter a message" in resp.data.lower()
+
+    @patch.object(app_module, "get_sheet")
+    def test_incoming_call_uses_greeting_from_spreadsheet(self, mock_sheet, client):
+        """The /incoming-call route should use the greeting from the spreadsheet."""
+        mock_ws = MagicMock()
+        mock_ws.get_all_values.return_value = [
+            ["Voicemail Greeting", ""],
+            ["Date/Time", "Message"],
+            ["2026-03-30 12:00:00", "Custom greeting from sheet"],
+        ]
+        mock_sheet.return_value.worksheet.return_value = mock_ws
+        resp = client.post(
+            "/incoming-call",
+            data={"From": "+15551111111", "CallSid": "CA123"},
+        )
+        assert b"Custom greeting from sheet" in resp.data
+
+    @patch.object(app_module, "get_sheet")
+    def test_incoming_call_falls_back_to_default(self, mock_sheet, client):
+        """If no greeting in spreadsheet, use the default."""
+        mock_ws = MagicMock()
+        mock_ws.get_all_values.return_value = [
+            ["Voicemail Greeting", ""],
+            ["Date/Time", "Message"],
+        ]
+        mock_sheet.return_value.worksheet.return_value = mock_ws
+        resp = client.post(
+            "/incoming-call",
+            data={"From": "+15551111111", "CallSid": "CA123"},
+        )
+        assert b"Alexandria" in resp.data

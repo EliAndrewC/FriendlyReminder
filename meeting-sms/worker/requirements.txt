@@ -1,0 +1,5 @@
+f5-tts
+gspread
+google-auth
+requests
+twilio

@@ -38,6 +38,11 @@ SPREADSHEET_ID = os.environ["SPREADSHEET_ID"]
 TWILIO_AUTH_TOKEN = os.environ["TWILIO_AUTH_TOKEN"]
 
 STOP_SUFFIX = "\nReply STOP to unsubscribe"
+DEFAULT_VOICEMAIL_GREETING = (
+    "Hello, this is the Alexandria Meeting for Worship of the Religious Society of Friends, "
+    "better known as the Quakers. "
+    "Leave a message and someone will get back to you."
+)
 MAX_MESSAGE_LENGTH = 160 - len(STOP_SUFFIX)
 
 # In-memory OTP storage: {phone: {"code": str, "expires": float}}
@@ -234,6 +239,103 @@ def send():
 APP_URL = os.environ.get("APP_URL", "https://ammsms.fly.dev")
 
 
+def _launch_tts_worker(message, mode, sheet_name):
+    """Launch a GPU worker machine to generate TTS audio and place calls.
+
+    Returns the machine ID on success, or None if TTS is not configured.
+    """
+    fly_api_token = os.environ.get("FLY_API_TOKEN")
+    tts_image = os.environ.get("TTS_IMAGE")
+    tts_app_name = os.environ.get("TTS_APP_NAME", "ammsms")
+
+    if not fly_api_token or not tts_image:
+        return None
+
+    machine_config = {
+        "config": {
+            "image": tts_image,
+            "env": {
+                "MESSAGE_TEXT": message,
+                "MODE": mode,
+                "SHEET_NAME": sheet_name,
+                "GOOGLE_CREDENTIALS": os.environ["GOOGLE_CREDENTIALS"],
+                "SPREADSHEET_ID": os.environ["SPREADSHEET_ID"],
+                "TWILIO_ACCOUNT_SID": os.environ["TWILIO_ACCOUNT_SID"],
+                "TWILIO_AUTH_TOKEN": os.environ["TWILIO_AUTH_TOKEN"],
+                "TWILIO_FROM_NUMBER": TWILIO_FROM,
+                "APP_URL": APP_URL,
+                "REF_TEXT": os.environ.get("REF_TEXT", ""),
+                "TTS_UPLOAD_SECRET": TTS_UPLOAD_SECRET,
+                "WORKER_TIMEOUT": "900",
+            },
+            "auto_destroy": True,
+            "guest": {
+                "cpu_kind": "performance",
+                "cpus": 4,
+                "memory_mb": 8192,
+            },
+        },
+        "region": "iad",
+    }
+
+    resp = http_requests.post(
+        f"https://api.machines.dev/v1/apps/{tts_app_name}/machines",
+        headers={
+            "Authorization": f"Bearer {fly_api_token}",
+            "Content-Type": "application/json",
+        },
+        json=machine_config,
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return resp.json().get("id")
+
+
+def _launch_greeting_worker(greeting_text):
+    """Launch a worker machine to generate TTS audio for the voicemail greeting.
+
+    Returns the machine ID on success, or None if TTS is not configured.
+    """
+    fly_api_token = os.environ.get("FLY_API_TOKEN")
+    tts_image = os.environ.get("TTS_IMAGE")
+    tts_app_name = os.environ.get("TTS_APP_NAME", "ammsms")
+
+    if not fly_api_token or not tts_image:
+        return None
+
+    machine_config = {
+        "config": {
+            "image": tts_image,
+            "init": {"exec": ["python", "generate_greeting.py"]},
+            "env": {
+                "GREETING_TEXT": greeting_text,
+                "REF_TEXT": os.environ.get("REF_TEXT", ""),
+                "APP_URL": APP_URL,
+                "TTS_UPLOAD_SECRET": TTS_UPLOAD_SECRET,
+            },
+            "auto_destroy": True,
+            "guest": {
+                "cpu_kind": "performance",
+                "cpus": 8,
+                "memory_mb": 16384,
+            },
+        },
+        "region": "iad",
+    }
+
+    resp = http_requests.post(
+        f"https://api.machines.dev/v1/apps/{tts_app_name}/machines",
+        headers={
+            "Authorization": f"Bearer {fly_api_token}",
+            "Content-Type": "application/json",
+        },
+        json=machine_config,
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return resp.json().get("id")
+
+
 @app.route("/voice", methods=["GET", "POST"])
 @login_required
 def voice():
@@ -248,6 +350,18 @@ def voice():
         return render_template("voice.html")
 
     sheet_name = "Recipients" if mode == "real" else "Test"
+
+    # Try to launch TTS worker (fire and forget)
+    try:
+        machine_id = _launch_tts_worker(message, mode, sheet_name)
+        if machine_id:
+            return render_template(
+                "voice_sent.html", mode=mode, message=message, async_mode=True
+            )
+    except Exception:
+        pass  # Fall through to synchronous <Say> fallback
+
+    # Fallback: synchronous calls with <Say> (current behavior)
     contacts = get_contacts(sheet_name)
     voice_contacts = [c for c in contacts if c["voice"] and not c["opted_out"]]
 
@@ -332,15 +446,17 @@ def _log_outgoing(msg_type, mode, sent_count, message):
         sheet = get_sheet()
         log_ws = sheet.worksheet("Message Log")
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        log_ws.append_row([timestamp, mode, msg_type, sent_count, message])
+        log_ws.insert_row([timestamp, mode, msg_type, sent_count, message], index=3)
     except Exception:
         pass  # Best-effort; don't break the send flow
 
 
-def _should_notify(sheet):
-    """Check if enough time has passed since the last incoming message to send a notification.
+def _should_notify(sheet, sender_name=""):
+    """Check if we should send a notification for this sender.
 
-    Returns True if there are no recent messages (within 1 hour) in SMS Replies or Voicemails.
+    Deduplicates by sender: if the same sender (by name) has a recent message
+    (within 1 hour), suppress the notification. Unknown senders (empty name)
+    are all treated as the same sender for dedup purposes.
     """
     from datetime import datetime, timedelta
 
@@ -350,16 +466,20 @@ def _should_notify(sheet):
         try:
             ws = sheet.worksheet(tab_name)
             rows = ws.get_all_values()
-            # Timestamps are in column C (index 2) for both tabs
+            # Check all recent rows, not just the most recent
+            # Name is in column B (index 1), timestamp in column C (index 2)
             for row in reversed(rows[2:]):
                 if len(row) > 2 and row[2].strip():
                     try:
                         ts = datetime.strptime(row[2].strip(), "%Y-%m-%d %H:%M:%S")
-                        if ts > one_hour_ago:
-                            return False
                     except ValueError:
-                        continue  # Malformed timestamp, skip it
-                    break  # Only need to check the most recent valid timestamp per tab
+                        continue
+                    if ts <= one_hour_ago:
+                        break  # No more recent rows in this tab
+                    # Recent row — check if same sender
+                    row_name = row[1].strip() if len(row) > 1 else ""
+                    if row_name == sender_name:
+                        return False
         except Exception:
             continue
 
@@ -416,11 +536,11 @@ def sms_reply():
 
     try:
         sheet = get_sheet()
-        should_notify = _should_notify(sheet)
         name = _lookup_name(sheet, phone)
+        should_notify = _should_notify(sheet, name)
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         replies_ws = sheet.worksheet("SMS Replies")
-        replies_ws.append_row([phone, name, timestamp, body])
+        replies_ws.insert_row([phone, name, timestamp, body], index=3)
         if should_notify:
             _send_admin_notifications(sheet, name)
     except Exception:
@@ -430,15 +550,80 @@ def sms_reply():
     return Response(str(resp), content_type="text/xml")
 
 
+def _get_current_greeting(sheet=None):
+    """Read the current voicemail greeting from the spreadsheet.
+
+    Returns the most recent greeting text, or the default if none is set.
+    """
+    try:
+        if sheet is None:
+            sheet = get_sheet()
+        ws = sheet.worksheet("Voicemail Greeting")
+        rows = ws.get_all_values()
+        # Row 3 is the most recent (reverse chronological)
+        if len(rows) > 2 and len(rows[2]) > 1 and rows[2][1].strip():
+            return rows[2][1].strip()
+    except Exception:
+        pass
+    return DEFAULT_VOICEMAIL_GREETING
+
+
+@app.route("/voicemail-greeting", methods=["GET", "POST"])
+@login_required
+def voicemail_greeting():
+    from datetime import datetime
+
+    if request.method == "GET":
+        greeting = _get_current_greeting()
+        return render_template("voicemail_greeting.html", greeting=greeting)
+
+    message = request.form.get("message", "").strip()
+    if not message:
+        flash("Please enter a message.")
+        greeting = _get_current_greeting()
+        return render_template("voicemail_greeting.html", greeting=greeting)
+
+    try:
+        sheet = get_sheet()
+        ws = sheet.worksheet("Voicemail Greeting")
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ws.insert_row([timestamp, message], index=3)
+    except Exception:
+        flash("Failed to save greeting. Please try again.")
+        return render_template("voicemail_greeting.html", greeting=message)
+
+    # Kick off TTS generation for the new greeting
+    tts_launched = False
+    try:
+        machine_id = _launch_greeting_worker(message)
+        if machine_id:
+            tts_launched = True
+    except Exception:
+        pass
+
+    if tts_launched:
+        flash(
+            "Voicemail greeting updated. AI voice audio is being generated "
+            "(this takes a few minutes)."
+        )
+    else:
+        flash("Voicemail greeting updated (using text-to-speech fallback).")
+    return render_template("voicemail_greeting.html", greeting=message)
+
+
 @app.route("/incoming-call", methods=["POST"])
 @validate_twilio_request
 def incoming_call():
     resp = VoiceResponse()
-    resp.say(
-        "Hello, you've reached Alexandria Friends Meeting. "
-        "No one is available to take your call. "
-        "Please leave a message after the beep."
-    )
+    greeting = _get_current_greeting()
+
+    # Check if we have a TTS audio file for this greeting
+    greeting_audio = os.path.join(TTS_AUDIO_DIR, "voicemail_greeting.wav")
+    if os.path.exists(greeting_audio):
+        resp.play(f"{APP_URL}/tts-audio/voicemail_greeting.wav")
+    else:
+        resp.say(greeting)
+
     resp.record(
         max_length=120,
         timeout=5,
@@ -463,11 +648,13 @@ def recording_complete():
 
     try:
         sheet = get_sheet()
-        should_notify = _should_notify(sheet)
         name = _lookup_name(sheet, phone)
+        should_notify = _should_notify(sheet, name)
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         voicemails_ws = sheet.worksheet("Voicemails")
-        voicemails_ws.append_row([phone, name, timestamp, duration, proxy_url, ""])
+        voicemails_ws.insert_row(
+            [phone, name, timestamp, duration, proxy_url, ""], index=3
+        )
         if should_notify:
             _send_admin_notifications(sheet, name)
     except Exception:
@@ -529,6 +716,43 @@ def recording_proxy(sid):
         resp.content,
         content_type=resp.headers.get("Content-Type", "audio/mpeg"),
     )
+
+
+TTS_AUDIO_DIR = os.environ.get(
+    "TTS_AUDIO_DIR", os.path.join(os.path.dirname(__file__), "tts_audio")
+)
+os.makedirs(TTS_AUDIO_DIR, exist_ok=True)
+TTS_UPLOAD_SECRET = os.environ.get("TTS_UPLOAD_SECRET", "")
+
+
+@app.route("/tts-upload", methods=["POST"])
+def tts_upload():
+    """Accept audio uploads from the TTS worker."""
+    secret = request.headers.get("X-Upload-Secret", "")
+    if not TTS_UPLOAD_SECRET or secret != TTS_UPLOAD_SECRET:
+        return Response("Forbidden", status=403)
+
+    audio = request.files.get("audio")
+    filename = request.form.get("filename", "greeting.wav")
+    # Sanitize filename
+    filename = re.sub(r"[^a-zA-Z0-9_.-]", "", filename)
+    if not filename:
+        return Response("Bad filename", status=400)
+
+    filepath = os.path.join(TTS_AUDIO_DIR, filename)
+    audio.save(filepath)
+    url = f"{APP_URL}/tts-audio/{filename}"
+    return Response(json.dumps({"url": url}), content_type="application/json")
+
+
+@app.route("/tts-audio/<filename>")
+def tts_audio(filename):
+    """Serve TTS-generated audio files (publicly accessible for Twilio)."""
+    filename = re.sub(r"[^a-zA-Z0-9_.-]", "", filename)
+    filepath = os.path.join(TTS_AUDIO_DIR, filename)
+    if not os.path.exists(filepath):
+        return Response("Not found", status=404)
+    return send_from_directory(TTS_AUDIO_DIR, filename, mimetype="audio/wav")
 
 
 @app.route("/guestbook.pdf")

@@ -6,10 +6,12 @@ SMS and voice broadcast tool for Alexandria Friends Meeting. Clerks sign in via 
 
 - Python / Flask (single file: `app.py`)
 - Google Sheets API via `gspread` for contact management and message logging
+- Google Drive API for storing generated voice audio
 - Twilio for SMS (OTP auth, broadcast, incoming replies) and voice (outbound calls, voicemail, transcription)
+- F5-TTS for AI voice cloning (runs on ephemeral GPU machine via Fly Machines API)
 - Deployed on Fly.io (scales to zero)
 - Gunicorn as WSGI server
-- Docker (Python 3.12-slim)
+- Docker (Python 3.12-slim for web app, PyTorch/CUDA for TTS worker)
 
 ## Project structure
 
@@ -23,6 +25,12 @@ meeting-sms/
   Dockerfile          — Python 3.12 slim image, gunicorn on port 8080
   fly.toml            — Fly.io config (app: ammsms, region: iad, scales to zero)
   requirements.txt    — Pinned to major versions (flask 3.1, twilio 9, etc.)
+  worker/
+    worker.py         — Self-contained TTS voice broadcast script (runs on GPU machine)
+    test_worker.py    — Worker unit tests
+    Dockerfile        — PyTorch/CUDA image with F5-TTS
+    requirements.txt  — Worker dependencies (f5-tts, gspread, google-auth, twilio, etc.)
+    ref_audio/        — Admin's voice reference clip (admin_voice.mp3)
 
 setup_sheet.py      — One-time script that formatted the Google Spreadsheet tabs (already run, not part of the deployed app)
 woodlawn-sms-d74fa6940b5b.json — Google service account key file (do NOT commit or deploy; contents are set as a Fly secret)
@@ -59,8 +67,12 @@ Current secrets:
 - `SPREADSHEET_ID` — Google Spreadsheet ID
 - `GOOGLE_CREDENTIALS` — Full JSON of the Google service account key
 
-Optional env var (has a default):
+Optional env vars (have defaults or are only needed for TTS):
 - `APP_URL` — Base URL for webhook callbacks in TwiML (defaults to `https://ammsms.fly.dev`). Used by voice opt-out `<Gather>` action, recording-complete action, and transcription callback.
+- `TTS_IMAGE` — Docker image for the TTS worker. If not set, voice cloning is disabled and `<Say>` is used.
+- `REF_TEXT` — Transcript of the admin's voice reference clip (used by TTS worker)
+- `DRIVE_FOLDER_ID` — Google Drive folder ID for TTS audio uploads
+- `TTS_APP_NAME` — Fly app to create worker machines in (defaults to `ammsms`)
 
 ### Container bootstrap
 
@@ -197,6 +209,62 @@ Both webhooks are configured via the Twilio API on the toll-free number (`+18888
 - **Voice webhook:** `https://ammsms.fly.dev/incoming-call` (POST) — handles incoming calls with voicemail
 
 These can be viewed/updated via the Twilio Console under Phone Numbers > Active Numbers, or via the API.
+
+## Voice cloning (TTS worker)
+
+Voice broadcasts can optionally use AI voice cloning instead of Twilio's built-in robotic TTS. This uses a "fire and forget" pattern with the Fly.io Machines API.
+
+### How it works
+
+1. Clerk submits a voice message from the web UI
+2. Flask app calls the Fly Machines API to create an ephemeral GPU machine within the `ammsms` app
+3. Flask app immediately returns a "messages are being generated" page
+4. The GPU machine runs `worker/worker.py`, which:
+   - Generates cloned-voice audio using F5-TTS with the admin's voice reference clip
+   - Uploads audio to Google Drive (folder: "Meeting SMS Voice Audio")
+   - Places Twilio calls using `<Play>` instead of `<Say>`
+   - Logs results to the Message Log spreadsheet tab
+   - Exits (machine auto-destroys via `auto_destroy: true`)
+5. If `$NAME` is in the message, per-contact audio is generated; otherwise one shared audio file is reused
+
+### Fallback behavior
+
+- If `TTS_IMAGE` is not set, voice broadcasts use `<Say>` synchronously (original behavior)
+- If the Machines API call fails, falls back to `<Say>` synchronously
+- If F5-TTS fails inside the worker, the worker falls back to `<Say>` per-contact
+- The admin's voice clip and TTS are never required — the system always works without them
+
+### Configuration
+
+TTS is activated by setting these env vars / secrets on the `ammsms` app:
+
+- `TTS_IMAGE` — Docker image ref for the worker (e.g., `registry.fly.io/ammsms:tts-worker`). If not set, TTS is disabled.
+- `REF_TEXT` — Exact transcript of the admin's voice reference clip
+- `DRIVE_FOLDER_ID` — Google Drive folder ID for audio uploads (`1qUagGvNnPyIG5GOkvb3Nz0TR-Z83kVaP`)
+- `FLY_API_TOKEN` — Fly.io API token (already in `/workspace/.env`)
+
+### Building the worker image
+
+```bash
+cd /workspace/meeting-sms/worker
+fly deploy --app ammsms --image-label tts-worker --build-only
+```
+
+The worker image uses `pytorch/pytorch:2.2.2-cuda12.1-cudnn8-runtime` as base (~5GB). The admin's voice reference clip is baked into the image at `ref_audio/admin_voice.mp3`. To update the voice, replace the file and rebuild.
+
+### GPU machines
+
+The worker creates L40S GPU machines in the `ord` (Chicago) region at $1.25/hr. With ~5 min runtime per broadcast, each use costs ~$0.10. Machines are created on-demand and auto-destroy after the process exits.
+
+**Note:** Fly.io GPUs are deprecated and will be unavailable after August 1, 2026. The worker is a standalone Docker container and could be run on any GPU provider.
+
+### Google Drive
+
+Audio files are uploaded to a folder owned by the Google service account:
+- **Folder:** "Meeting SMS Voice Audio"
+- **URL:** https://drive.google.com/drive/folders/1qUagGvNnPyIG5GOkvb3Nz0TR-Z83kVaP
+- Files are shared as "anyone with link" so Twilio can fetch them via `<Play>`
+- The Google Drive API must be enabled in the Google Cloud Console (same project as the service account)
 
 ## Testing and linting
 

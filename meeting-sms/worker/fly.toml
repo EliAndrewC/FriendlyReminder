@@ -1,0 +1,5 @@
+app = 'ammsms'
+primary_region = 'iad'
+
+[build]
+  dockerfile = "Dockerfile"

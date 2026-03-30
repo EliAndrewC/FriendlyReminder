@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Voicemail greeting</h2>
+<p>This message is played when someone calls the Meeting's phone number.</p>
+<form method="post">
+    <label for="message">Greeting message</label>
+    <textarea id="message" name="message" rows="4" required>{{ greeting }}</textarea>
+    <button type="submit">Update greeting</button>
+</form>
+{% endblock %}
